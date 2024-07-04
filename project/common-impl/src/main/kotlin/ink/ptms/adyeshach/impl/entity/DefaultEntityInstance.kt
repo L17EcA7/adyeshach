@@ -28,12 +28,12 @@ import org.bukkit.Location
 import org.bukkit.World
 import org.bukkit.entity.Player
 import org.bukkit.util.Vector
-import taboolib.common.platform.function.info
 import taboolib.common.platform.function.submit
 import taboolib.common5.Baffle
 import taboolib.common5.cbool
 import taboolib.common5.cdouble
 import java.util.*
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CopyOnWriteArraySet
 
@@ -56,6 +56,12 @@ abstract class DefaultEntityInstance(entityType: EntityTypes = EntityTypes.ZOMBI
 
     override val z: Double
         get() = clientPosition.z
+
+    override val chunkX: Int
+        get() = (x / 16).toInt()
+
+    override val chunkZ: Int
+        get() = (z / 16).toInt()
 
     override val yaw: Float
         get() = clientPosition.yaw
@@ -93,6 +99,10 @@ abstract class DefaultEntityInstance(entityType: EntityTypes = EntityTypes.ZOMBI
     @Expose
     override var isNameTagVisible = true
         set(value) {
+            // 与 canSeeInvisible 冲突
+            if (!value) {
+                canSeeInvisible = false
+            }
             field = value
             VisualTeam.updateTeam(this)
         }
@@ -101,6 +111,10 @@ abstract class DefaultEntityInstance(entityType: EntityTypes = EntityTypes.ZOMBI
     @Expose
     override var isCollision = true
         set(value) {
+            // 与 canSeeInvisible 冲突
+            if (!value) {
+                canSeeInvisible = false
+            }
             field = value
             VisualTeam.updateTeam(this)
         }
@@ -109,6 +123,22 @@ abstract class DefaultEntityInstance(entityType: EntityTypes = EntityTypes.ZOMBI
     @Expose
     override var glowingColor = ChatColor.WHITE
         set(value) {
+            // 与 canSeeInvisible 冲突
+            if (value != ChatColor.WHITE) {
+                canSeeInvisible = true
+            }
+            field = value
+            VisualTeam.updateTeam(this)
+        }
+
+    /** 是否可见隐形单位 */
+    @Expose
+    override var canSeeInvisible = false
+        set(value) {
+            // 与其他其他记分板功能冲突
+            if (!isNameTagVisible || !isCollision || glowingColor != ChatColor.WHITE) {
+                return
+            }
             field = value
             VisualTeam.updateTeam(this)
         }
@@ -219,33 +249,37 @@ abstract class DefaultEntityInstance(entityType: EntityTypes = EntityTypes.ZOMBI
             }
         }
 
+    /** 附着单位 */
+    val attachedEntity = ConcurrentHashMap<Int, Vector>()
+
     override fun setCustomMeta(key: String, value: String?): Boolean {
         return when (key) {
+            // 实体姿态
             "pose" -> {
                 setPose(if (value != null) BukkitPose::class.java.getEnum(value) else BukkitPose.STANDING)
                 true
             }
-
+            // 是否傻逼
             "nitwit" -> {
                 isNitwit = value?.cbool ?: false
                 true
             }
-
+            // 移动速度
             "movespeed", "move_speed" -> {
                 moveSpeed = value?.cdouble ?: 0.2
                 true
             }
-
+            // 是否可见名称
             "nametagvisible", "name_tag_visible" -> {
                 isNameTagVisible = value?.cbool ?: true
                 true
             }
-
+            // 是否存在碰撞体积
             "collision", "is_collision" -> {
                 isCollision = value?.cbool ?: true
                 true
             }
-
+            // 发光颜色
             "glowingcolor", "glowing_color" -> {
                 glowingColor = if (value != null) {
                     if (value.startsWith('§')) {
@@ -258,27 +292,32 @@ abstract class DefaultEntityInstance(entityType: EntityTypes = EntityTypes.ZOMBI
                 }
                 true
             }
-
+            // 是否可见隐形单位
+            "canseeinvisible", "can_see_invisible" -> {
+                canSeeInvisible = value?.cbool ?: false
+                true
+            }
+            // 可见距离
             "visibledistance", "visible_distance" -> {
                 visibleDistance = value?.cdouble ?: AdyeshachSettings.visibleDistance
                 true
             }
-
+            // 加载后自动显示
             "visibleafterloaded", "visible_after_loaded" -> {
                 visibleAfterLoaded = value?.cbool ?: true
                 true
             }
-
+            // 模型引擎
             "modelenginename", "modelengine_name", "modelengine", "model_engine" -> {
                 modelEngineName = value ?: ""
                 true
             }
-
+            // 冻结
             "freeze", "isfreeze", "is_freeze" -> {
                 isFreeze = value?.cbool ?: false
                 true
             }
-
+            // 其他
             else -> false
         }
     }
@@ -363,7 +402,9 @@ abstract class DefaultEntityInstance(entityType: EntityTypes = EntityTypes.ZOMBI
         }
         // 处理事件
         val eventBus = DefaultAdyeshachAPI.localEventBus
-        if (!eventBus.callTeleport(this, location)) {
+        if (eventBus.callTeleport(this, location)) {
+            eventBus.postTeleport(this, location)
+        } else {
             return
         }
         val newPosition = EntityPosition.fromLocation(location)
@@ -389,6 +430,10 @@ abstract class DefaultEntityInstance(entityType: EntityTypes = EntityTypes.ZOMBI
         } else {
             clientPosition = newPosition
         }
+        // 同步 passengers 位置
+        getPassengers().forEach { it.teleport(location) }
+        // 更新 passengers 信息
+        refreshPassenger()
     }
 
     override fun setVelocity(vector: Vector) {
@@ -433,6 +478,18 @@ abstract class DefaultEntityInstance(entityType: EntityTypes = EntityTypes.ZOMBI
         } else {
             Adyeshach.api().getMinecraftAPI().getEntityOperator().updateEntityAnimation(getVisiblePlayers(), index, animation)
         }
+    }
+
+    override fun addAttachEntity(id: Int, relativePos: Vector) {
+        attachedEntity[id] = relativePos.clone()
+    }
+
+    override fun removeAttachEntity(id: Int) {
+        attachedEntity.remove(id)
+    }
+
+    override fun getAttachEntities(): Map<Int, Vector> {
+        return attachedEntity
     }
 
     override fun onTick() {
